@@ -1,4 +1,10 @@
 //! # Scheduler Module
+//! ## License
+//! MIT License
+//! ## Disclaimer
+//! This module is provided "as is", without warranty of any kind, express or implied. Use at your own risk.
+//! ## Author
+//! Andrzej Sulkowski
 //!
 //! This module provides a flexible scheduling system for asynchronous tasks,
 //! allowing for tasks to be scheduled based on specific intervals and conditions.
@@ -94,6 +100,9 @@
 //!     async fn time_out(self, ctx: Arc<Ctx2>) {
 //!         println!("Task timed out: {}", self.id);
 //!     }
+//!     async fn completed(self, ctx: Arc<Ctx2>){
+//!         println!("Task completed: {}", self.id);
+//!     }
 //! }
 //!
 //! #[derive(Clone, Debug)]
@@ -122,6 +131,8 @@
 //! }
 //! ```
 //! Ensure all the necessary types (`Scheduler`, `Schedulable`, `ScheduleConfig`, `ScheduleInterval`, `Ctx2`) are correctly defined and accessible in your module. This example assumes these types are part of the `scheduler_module`, and you should adjust the import paths to fit your project's structure.
+//! 
+//! 
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::fmt;
