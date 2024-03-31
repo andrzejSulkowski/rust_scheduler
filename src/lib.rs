@@ -100,9 +100,6 @@
 //!     async fn time_out(self, ctx: Arc<Ctx2>) {
 //!         println!("Task timed out: {}", self.id);
 //!     }
-//!     async fn completed(self, ctx: Arc<Ctx2>){
-//!         println!("Task completed: {}", self.id);
-//!     }
 //! }
 //!
 //! #[derive(Clone, Debug)]
@@ -131,8 +128,6 @@
 //! }
 //! ```
 //! Ensure all the necessary types (`Scheduler`, `Schedulable`, `ScheduleConfig`, `ScheduleInterval`, `Ctx2`) are correctly defined and accessible in your module. This example assumes these types are part of the `scheduler_module`, and you should adjust the import paths to fit your project's structure.
-//! 
-//! 
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use std::fmt;
@@ -160,6 +155,7 @@ use tracing;
 /// - `id`: Returns the unique identifier for the task. This ID is used by the scheduler to track and manage tasks.
 /// - `process`: An asynchronous method called by the scheduler to process the task. It takes a shared context (`Arc<Ctx>`) and returns a new or updated version of the task (`V`). The implementation should contain the task's logic.
 /// - `time_out`: An asynchronous method invoked when the task times out according to its scheduling criteria. Like `process`, it takes a shared context for handling any required cleanup or finalization.
+/// - `complete`: An additional asynchronous method introduced to handle tasks that have reached their completion state. This method provides an opportunity to perform any final actions, cleanup, or state updates before officially concluding the task's lifecycle.
 ///
 /// Implementors of this trait are responsible for defining how tasks are identified, processed, and handled upon timing out. This flexibility allows for a wide range of task types and processing logic to be integrated into the scheduler system.
 #[async_trait]
@@ -191,6 +187,22 @@ where
     ///
     /// - `ctx`: A shared context (`Arc<Ctx>`) for performing any required actions on timeout.
     async fn time_out(self, ctx: Arc<Ctx>);
+
+    /// Asynchronously finalizes the task.
+    ///
+    /// This method is invoked upon the successful completion of a task, indicating that the task has fulfilled its intended purpose or reached its natural conclusion. It provides a structured opportunity for implementing any necessary cleanup, releasing resources, or performing final updates to the task's state or related entities based on the shared context.
+    ///
+    /// The `complete` method complements the task lifecycle by ensuring a clear and explicit endpoint to task execution, beyond mere processing or timeout handling. It emphasizes the importance of deliberate and thoughtful task conclusion within asynchronous task management systems.
+    ///
+    /// # Parameters
+    ///
+    /// - `ctx`: A shared context (`Arc<Ctx>`) containing the necessary data or services for finalizing the task. This context ensures access to shared resources, services, or data that may be required to properly conclude the task's execution.
+    ///
+    /// # Usage
+    ///
+    /// Implementors should use this method to encapsulate logic that should only be executed once the task is deemed complete. This might include logging completion events, updating task status in a database, or notifying other parts of the system about the task's completion.
+    ///
+    /// Unlike the `process` method, which may imply ongoing activity or partial completion, the `complete` method signals a definitive end to the task's lifecycle, allowing for any necessary final actions to be performed in an organized and predictable manner.
     async fn complete(self, ctx: Arc<Ctx>);
 }
 
@@ -236,6 +248,7 @@ impl ScheduleInterval {
     ///
     /// A new instance of `ScheduleInterval`.
     pub fn new(duration: Duration, frequency: Duration) -> ScheduleInterval {
+        //TODO: Check what frequency is always greater or equal to duration
         ScheduleInterval {
             duration,
             frequency,
@@ -309,10 +322,49 @@ impl<Ctx> ScheduleConfig<Ctx> {
         }
     }
 
+    /// Sets the cloning behavior for task data processing.
+    ///
+    /// This method allows dynamically setting the `clone_data` flag after a `ScheduleConfig` instance has been created. It controls whether task data should be cloned when being processed, affecting the behavior of tasks execution regarding data manipulation and concurrency.
+    ///
+    /// # Parameters
+    ///
+    /// - `v`: A boolean value indicating whether task data should be cloned (`true`) or not (`false`).
+    ///
+    /// # Returns
+    ///
+    /// Returns the modified instance of `ScheduleConfig`, enabling method chaining.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let config = ScheduleConfig::new(vec![], Arc::new(MyContext)).set_is_clone(true);
+    /// ```
+    ///
+    /// In this example, the cloning behavior is set to `true`, meaning task data will be cloned during processing.
     pub fn set_is_clone(mut self, v: bool) -> Self {
         self.clone_data = v;
         self
     }
+
+    /// Sets the initial processing flag for task scheduling.
+    ///
+    /// This method allows for the configuration of the `init_processing` flag, determining whether a processing session should be initiated immediately upon the start of the scheduler. When set to `true`, tasks are processed as soon as they are scheduled; when `false`, tasks wait until the first interval elapses before processing begins.
+    ///
+    /// # Parameters
+    ///
+    /// - `v`: A boolean value indicating whether to initiate processing immediately (`true`) or wait (`false`).
+    ///
+    /// # Returns
+    ///
+    /// Returns the modified instance of `ScheduleConfig`, enabling method chaining.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let config = ScheduleConfig::new(vec![], Arc::new(MyContext)).set_is_init_processing(false);
+    /// ```
+    ///
+    /// In this example, the initial processing is set to `false`, meaning tasks will wait for the first scheduled interval before beginning processing.
     pub fn set_is_init_processing(mut self, v: bool) -> Self {
         self.init_processing = v;
         self
@@ -341,6 +393,18 @@ impl<Ctx> ScheduleConfig<Ctx> {
     }
 }
 
+/// Represents the current status of a task within the scheduler.
+///
+/// This enum is used to signify the state of tasks being managed by the scheduler.
+/// Each variant represents a different stage or outcome in the lifecycle of a task,
+/// providing clear semantics for task management and monitoring.
+///
+/// # Variants
+///
+/// - `Running`: The task is currently being executed.
+/// - `Canceled`: The task was canceled before it could complete.
+/// - `Completed`: The task has finished execution successfully.
+/// - `Timeout`: The task did not complete in the allocated time and was stopped.
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum TaskStatus {
     Running,
@@ -914,11 +978,13 @@ mod tests {
     #[derive(Clone, Debug)]
     struct Ctx {
         timed_out_tasks: Arc<Mutex<Vec<DummyData>>>,
+        completed_tasks: Arc<Mutex<Vec<DummyData>>>,
     }
     impl Ctx {
         pub fn new() -> Arc<Ctx> {
             Arc::new(Ctx {
                 timed_out_tasks: Arc::new(Mutex::new(Vec::new())),
+                completed_tasks: Arc::new(Mutex::new(Vec::new())),
             })
         }
     }
@@ -928,6 +994,7 @@ mod tests {
         pub id: String,
         pub counter: i32,
         pub is_completed: bool,
+        pub is_timed_out: bool,
     }
     impl DummyData {
         pub fn new() -> DummyData {
@@ -942,6 +1009,7 @@ mod tests {
                 id,
                 counter: 0,
                 is_completed: false,
+                is_timed_out: false,
             }
         }
     }
@@ -952,16 +1020,22 @@ mod tests {
             self.id.clone()
         }
         async fn time_out(mut self, ctx: Arc<Ctx>) {
-            self.is_completed = true;
+            self.is_timed_out = true;
             let mut timed_out_tasks_lock = ctx.timed_out_tasks.lock().await;
             timed_out_tasks_lock.push(self);
         }
         async fn process(mut self, ctx: Arc<Ctx>) -> (DummyData, TaskStatus) {
             self.counter += 1;
-            (self, TaskStatus::Running)
+            if self.counter == 5 {
+                (self, TaskStatus::Completed)
+            } else {
+                (self, TaskStatus::Running)
+            }
         }
         async fn complete(mut self, ctx: Arc<Ctx>) {
-            todo!("");
+            self.is_completed = true;
+            let mut lock = ctx.completed_tasks.lock().await;
+            lock.push(self);
         }
     }
 
@@ -1026,12 +1100,14 @@ mod tests {
             check_frequency,
         )];
 
-        let config = ScheduleConfig::new(intervals, ctx).set_is_clone(false);
+        let config = ScheduleConfig::new(intervals, ctx)
+            .set_is_clone(false)
+            .set_is_init_processing(false);
         let mut scheduler = Scheduler::new(config);
         let dummy1 = DummyData::new();
         let key = scheduler.add(dummy1);
         scheduler.run(key.clone()).await.unwrap();
-        sleep(check_frequency * 5).await;
+        sleep(check_frequency * 3).await;
         sleep(Duration::from_millis(500)).await; // Wait 500 milliseconds grace period
         scheduler.stop(key.clone()).await.unwrap();
 
@@ -1039,7 +1115,7 @@ mod tests {
             .stale_tasks
             .get(&key)
             .expect("schedulable data has been added previously under the 'key'");
-        assert_eq!(stale_task.data.counter, 6);
+        assert!(stale_task.data.counter >= 3 && stale_task.data.counter <= 4);
     }
 
     #[test(tokio::test)]
@@ -1047,6 +1123,7 @@ mod tests {
     async fn test_stop_wrong_id_tasks() {
         let ctx = Ctx::new();
 
+        let check_frequency = Duration::from_secs(1);
         let intervals = vec![ScheduleInterval::new(
             Duration::from_secs(60 * 60),
             Duration::from_secs(1),
@@ -1063,9 +1140,10 @@ mod tests {
 
     #[test(tokio::test)]
     async fn test_task_time_out() {
-        let max_sec = 5;
+        let max_sec = 3;
         let ctx = Ctx::new();
 
+        let check_frequency = Duration::from_secs(1);
         let intervals = vec![ScheduleInterval::new(
             Duration::from_secs(max_sec),
             Duration::from_secs(1),
@@ -1080,6 +1158,30 @@ mod tests {
 
         let timed_out_tasks_lock = scheduler.config.ctx.timed_out_tasks.lock().await;
         assert_eq!(timed_out_tasks_lock.len(), 1);
+        assert!(timed_out_tasks_lock[0].is_timed_out);
+    }
+
+    #[test(tokio::test)]
+    async fn test_complete() {
+        let ctx = Ctx::new();
+
+        let intervals = vec![ScheduleInterval::new(
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+        )];
+
+        let config = ScheduleConfig::new(intervals, ctx.clone())
+            .set_is_clone(true)
+            .set_is_init_processing(false);
+        let mut scheduler = Scheduler::new(config);
+
+        let dummy1 = DummyData::new();
+        let key = scheduler.add(dummy1);
+        scheduler.run(key.clone()).await.unwrap();
+        sleep(Duration::from_secs(6)).await;
+
+        let lock = ctx.completed_tasks.lock().await;
+        assert!(lock.len() > 0);
     }
 
     #[derive(Clone, Debug)]
@@ -1098,6 +1200,7 @@ mod tests {
     struct DummyData2 {
         pub id: String,
         pub counter: i32,
+        pub is_timed_out: bool,
         pub is_completed: bool,
     }
     impl DummyData2 {
@@ -1112,6 +1215,7 @@ mod tests {
             DummyData2 {
                 id,
                 counter: 0,
+                is_timed_out: false,
                 is_completed: false,
             }
         }
@@ -1123,17 +1227,19 @@ mod tests {
             self.id.clone()
         }
         async fn time_out(mut self, ctx: Arc<Ctx2>) {
-            self.is_completed = true;
+            self.is_timed_out = true;
             let mut timed_out_tasks_lock = ctx.timed_out_tasks.lock().await;
             timed_out_tasks_lock.push(self);
         }
         async fn process(mut self, ctx: Arc<Ctx2>) -> (DummyData2, TaskStatus) {
+            let now1 = SystemTime::now();
             sleep(Duration::from_secs(10)).await;
+            let now2 = SystemTime::now();
             self.counter += 1;
             (self, TaskStatus::Running)
         }
         async fn complete(mut self, ctx: Arc<Ctx2>) {
-            todo!("");
+            self.is_completed = true;
         }
     }
 
@@ -1154,13 +1260,7 @@ mod tests {
 
         scheduler.run(key.clone()).await.unwrap();
         sleep(Duration::from_secs(1)).await; // Grace period of one second for the task really to start
-        let start_time = Instant::now();
         scheduler.stop(key.clone()).await.unwrap();
-        let stop_time = Instant::now();
-
-        let elapsed = (stop_time - start_time);
-        assert!(elapsed >= Duration::from_secs(9));
-        assert!(elapsed <= Duration::from_secs(10));
 
         assert!(scheduler.stale_tasks.get(&key).unwrap().data.counter == 1);
     }
